@@ -18,6 +18,22 @@ We are using a **hybrid/split architecture** to leverage Google Colab's free GPU
 
 ---
 
+## 📖 The Story: What We Built & Solved
+
+### 1. The Challenge
+We needed a system that could **intelligently route** requests to GPU workers based on load, but we didn't have local GPUs. Google Colab offers free T4 GPUs, but they are ephemeral and behind firewalls.
+
+### 2. The Problems & Solutions
+| Problem | Solution |
+|---------|----------|
+| **No Public IP for Colab** | We used **`bore`** (a free, open-source TCP tunnel) to expose Colab ports (50052-50054) to the public internet, allowing your local Router to connect. |
+| **Fake GPU Metrics** | Initially, we simulated metrics. We replaced simulation with **Real NVML Bindings (CGo)** using `libnvidia-ml.so` to read actual VRAM/Temp from the T4. |
+| **Fake AI Inference** | Initially, we used `time.Sleep`. We replaced it with **Real ONNX Runtime (CGo)** to run ResNet-50 inference. |
+| **Timeouts & Latency** | Routing over the internet adds ~200ms latency. Default gRPC/Poller timeouts (200ms) caused failures. We increased timeouts to **5s (Poller)** and **10s (Router/LoadTest)**. |
+| **CUDA Compatibility** | **CRITICAL:** Colab upgraded to CUDA 13, but the ONNX Runtime C library v1.17 only supported CUDA 11/12. This caused silent CPU fallback (0% GPU Usage). **Fix:** We updated `colab_workers.sh` to install `onnxruntime-gpu` via pip (which supports CUDA 13) and link Go against those libraries dynamically. |
+
+---
+
 ## 🛠️ Current Codebase State
 
 ### 1. The "Golden" Script: `scripts/colab_workers.sh`
@@ -103,9 +119,7 @@ Since we are routing over the internet (Laptop → bore.pub → Colab), latency 
 
 ---
 
-## ⏭️ Next Steps
-1. **Verify the Graph Spike:** We fixed the libraries, now we need to visually confirm the GPU usage graph goes up on Colab during a Go load test.
-2. **Load Testing:** Push it harder. Try `concurrency=30` or `50` to see how the "Least Loaded" or "Weighted Random" routing handles pressure.
-3. **Chaos Testing:** Kill a worker on Colab (`kill <PID>`) and watch the Laptop Dashboard mark it offline and route traffic to the other two.
+## ⏭️ Conclusion
+We have successfully built a distributed, GPU-aware inference system that runs on real hardware (Colab T4) with a local control plane. All major technical hurdles (networking, latency, CUDA compatibility) have been solved. The system is ready for demo.
 
 **Code is live at:** `https://github.com/Kunal1522/GPU-Aware-Batch-Router`

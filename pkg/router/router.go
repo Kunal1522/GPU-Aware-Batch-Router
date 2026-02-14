@@ -128,8 +128,10 @@ func (r *Router) Infer(ctx context.Context, req *pb.InferRequest) (*pb.InferResp
 			return nil, status.Error(codes.Unavailable, "no healthy workers available")
 		}
 
-		// Forward request to chosen worker
-		resp, err := worker.InferClient.Infer(ctx, req)
+		// Forward request to chosen worker with generous timeout for remote workers
+		fwdCtx, fwdCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		resp, err := worker.InferClient.Infer(fwdCtx, req)
+		fwdCancel()
 		if err == nil {
 			// Success — track routing distribution
 			if counter, ok := r.routingDistribution[worker.Address]; ok {

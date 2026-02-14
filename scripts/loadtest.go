@@ -72,7 +72,8 @@ func main() {
 				}
 
 				reqStart := time.Now()
-				resp, err := client.Infer(ctx, &pb.InferRequest{
+				reqCtx, reqCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				resp, err := client.Infer(reqCtx, &pb.InferRequest{
 					RequestId: fmt.Sprintf("req-%d-%d", clientID, totalRequests.Load()),
 					Payload:   make([]byte, 1024), // 1KB payload
 					Timestamp: time.Now().UnixNano(),
@@ -81,9 +82,11 @@ func main() {
 				})
 
 				if err != nil {
+					reqCancel()
 					totalErrors.Add(1)
 					continue
 				}
+				reqCancel()
 
 				elapsed := time.Since(reqStart)
 				totalRequests.Add(1)

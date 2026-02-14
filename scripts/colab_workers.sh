@@ -1,32 +1,27 @@
 #!/bin/bash
 # =============================================================================
-# GPU Batch Router — Colab WORKERS ONLY
-# 
-# This script runs ONLY the GPU workers on Colab (real T4 GPU).
-# Your router + dashboard runs on YOUR LOCAL machine.
+# GPU Batch Router — Colab WORKERS ONLY (Split Architecture)
 #
-# How it works:
-#   Colab (workers) ←── ngrok tunnels ──→ Your laptop (router + dashboard)
+# Workers run here on Colab (real T4 GPU)
+# Router + Dashboard run on YOUR laptop
 #
-# Usage in Colab:
-#   !bash scripts/colab_workers.sh
+# Uses bore.pub for free TCP tunnels (no signup, no credit card)
 # =============================================================================
 set -euo pipefail
 
 echo "═══════════════════════════════════════════════════════════"
-echo "🚀 GPU Workers — Colab Setup (workers only)"
+echo "🚀 GPU Workers — Colab (split architecture)"
 echo "═══════════════════════════════════════════════════════════"
 
 # --- Step 1: Verify GPU ---
 echo ""
 echo "📌 Step 1: Checking GPU..."
 if ! nvidia-smi &>/dev/null; then
-    echo "❌ No GPU! Go to Runtime → Change runtime type → T4 GPU"
+    echo "❌ No GPU! Runtime → Change runtime type → T4 GPU"
     exit 1
 fi
 GPU_NAME=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader | head -1)
-GPU_VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader | head -1)
-echo "✅ GPU: $GPU_NAME ($GPU_VRAM)"
+echo "✅ GPU: $GPU_NAME"
 
 # --- Step 2: Install Go ---
 echo ""
@@ -76,29 +71,44 @@ echo "📌 Step 5: Downloading ResNet-50..."
 mkdir -p models
 if [ ! -f "models/resnet50.onnx" ]; then
     wget -q "https://github.com/onnx/models/raw/main/validated/vision/classification/resnet/model/resnet50-v2-7.onnx" \
-         -O models/resnet50.onnx 2>/dev/null || echo "⚠️  Model download failed — using simulation"
+         -O models/resnet50.onnx 2>/dev/null || echo "⚠️  Download failed"
 fi
-[ -f "models/resnet50.onnx" ] && echo "✅ ResNet-50 ready ($(du -h models/resnet50.onnx | awk '{print $1}'))"
+[ -f "models/resnet50.onnx" ] && echo "✅ ResNet-50 ready"
 
-# --- Step 6: Build worker binary ---
+# --- Step 6: Build worker ---
 echo ""
-echo "📌 Step 6: Building worker binary..."
+echo "📌 Step 6: Building worker..."
 bash scripts/gen-proto.sh
 go mod tidy 2>/dev/null
 
+EXECUTOR_TYPE="simulation"
 if CGO_ENABLED=1 go build -tags "onnx,nvml" -o bin/worker ./cmd/worker/ 2>/dev/null; then
-    echo "✅ Worker built with REAL ONNX + NVML"
+    echo "✅ Worker: REAL ONNX + NVML"
     EXECUTOR_TYPE="onnx"
 else
-    echo "⚠️  CGo failed — building simulation"
     go build -o bin/worker ./cmd/worker/
-    EXECUTOR_TYPE="simulation"
+    echo "✅ Worker: simulation"
 fi
 
-# --- Step 7: Start 3 workers ---
+# --- Step 7: Install bore (free TCP tunnel) ---
 echo ""
-echo "📌 Step 7: Starting 3 GPU workers..."
+echo "📌 Step 7: Installing bore tunnel..."
+if ! command -v bore &>/dev/null; then
+    wget -q "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz" \
+         -O bore.tar.gz
+    tar -xzf bore.tar.gz
+    sudo mv bore /usr/local/bin/bore
+    rm bore.tar.gz
+    echo "✅ bore installed"
+else
+    echo "✅ bore already installed"
+fi
+
+# --- Step 8: Start workers ---
+echo ""
+echo "📌 Step 8: Starting 3 GPU workers..."
 pkill -f "bin/worker" 2>/dev/null || true
+pkill -f "bore local" 2>/dev/null || true
 sleep 1
 
 export ONNX_MODEL_PATH="$(pwd)/models/resnet50.onnx"
@@ -116,52 +126,68 @@ for i in 1 2 3; do
     USE_NVML=true \
     LD_LIBRARY_PATH="/usr/local/onnxruntime/lib:${LD_LIBRARY_PATH:-}" \
     nohup ./bin/worker > /tmp/worker-${i}.log 2>&1 &
-    
     echo "   ⚡ Worker-${i} on :${GRPC_PORT}"
 done
 sleep 3
 
-# --- Step 8: Expose workers via ngrok ---
+# --- Step 9: Expose workers via bore tunnels ---
 echo ""
-echo "📌 Step 8: Exposing workers via ngrok..."
-pip install -q pyngrok 2>/dev/null
+echo "📌 Step 9: Creating bore tunnels..."
+echo ""
 
-python3 << 'PYTHON_SCRIPT'
-import json
-from pyngrok import ngrok
+BORE_PORTS=""
+for i in 1 2 3; do
+    LOCAL_PORT=$((50051 + i))
+    # bore assigns a random public port on bore.pub
+    nohup bore local ${LOCAL_PORT} --to bore.pub > /tmp/bore-${i}.log 2>&1 &
+    sleep 2
+done
 
-tunnels = {}
-for i in range(1, 4):
-    port = 50051 + i
-    try:
-        tunnel = ngrok.connect(port, "tcp")
-        public_url = tunnel.public_url.replace("tcp://", "")
-        tunnels[f"worker-{i}"] = public_url
-        print(f"   ✅ Worker-{i} (:{ port }) → {public_url}")
-    except Exception as e:
-        print(f"   ❌ Worker-{i} ngrok failed: {e}")
-
-if tunnels:
-    endpoints = ",".join(tunnels.values())
-    print("")
-    print("═══════════════════════════════════════════════════════════")
-    print("🎉 WORKERS ARE LIVE ON REAL GPU!")
-    print("")
-    print("Copy this command and run it on YOUR LOCAL machine:")
-    print("")
-    print(f"   WORKER_ENDPOINTS={endpoints} \\")
-    print(f"   go run ./cmd/router/")
-    print("")
-    print("Then open: http://localhost:8080")
-    print("═══════════════════════════════════════════════════════════")
-else:
-    print("")
-    print("❌ ngrok failed. Sign up free at https://dashboard.ngrok.com/signup")
-    print("   Then run in Colab: !ngrok authtoken YOUR_TOKEN")
-    print("   Then re-run: !bash scripts/colab_workers.sh")
-
-PYTHON_SCRIPT
+# Wait for tunnels to establish
+sleep 3
 
 echo ""
-echo "📋 Worker logs: cat /tmp/worker-1.log"
-echo "🔍 GPU status:  nvidia-smi -l 1"
+echo "═══════════════════════════════════════════════════════════"
+echo "🎉 WORKERS RUNNING ON REAL GPU!"
+echo ""
+echo "📋 Check bore tunnel addresses:"
+echo ""
+for i in 1 2 3; do
+    PORT=$((50051 + i))
+    BORE_ADDR=$(grep -oP 'bore\.pub:\d+' /tmp/bore-${i}.log 2>/dev/null | tail -1)
+    if [ -n "$BORE_ADDR" ]; then
+        echo "   Worker-${i}  →  ${BORE_ADDR}"
+        if [ -z "$BORE_PORTS" ]; then
+            BORE_PORTS="${BORE_ADDR}"
+        else
+            BORE_PORTS="${BORE_PORTS},${BORE_ADDR}"
+        fi
+    else
+        echo "   Worker-${i}  →  checking... (cat /tmp/bore-${i}.log)"
+    fi
+done
+
+echo ""
+if [ -n "$BORE_PORTS" ]; then
+    echo "═══════════════════════════════════════════════════════════"
+    echo "👉 ON YOUR LAPTOP, run this command:"
+    echo ""
+    echo "   cd ~/Desktop/demo_yc_!"
+    echo "   WORKER_ENDPOINTS=${BORE_PORTS} go run ./cmd/router/"
+    echo ""
+    echo "Then open: http://localhost:8080"
+    echo "═══════════════════════════════════════════════════════════"
+else
+    echo "⚠️  Bore tunnels still starting. Check addresses with:"
+    echo "   !cat /tmp/bore-1.log"
+    echo "   !cat /tmp/bore-2.log"
+    echo "   !cat /tmp/bore-3.log"
+    echo ""
+    echo "Look for lines like: 'listening at bore.pub:XXXXX'"
+    echo "Then on your laptop run:"
+    echo "   WORKER_ENDPOINTS=bore.pub:PORT1,bore.pub:PORT2,bore.pub:PORT3 go run ./cmd/router/"
+fi
+
+echo ""
+echo "📋 Logs:  cat /tmp/worker-1.log"
+echo "🔍 GPU:   nvidia-smi"

@@ -2,10 +2,8 @@
 # =============================================================================
 # GPU Batch Router — Colab WORKERS ONLY (Split Architecture)
 #
-# Workers run here on Colab (real T4 GPU)
-# Router + Dashboard run on YOUR laptop
-#
-# Uses bore.pub for free TCP tunnels (no signup, no credit card)
+# Workers run here on Colab (real T4 GPU) | Router + Dashboard run on YOUR laptop
+# Uses bore.pub for free TCP tunnels (no signup)
 # =============================================================================
 set -euo pipefail
 
@@ -47,23 +45,32 @@ go install google.golang.org/protobuf/cmd/protoc-gen-go@latest 2>/dev/null
 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest 2>/dev/null
 echo "✅ protoc ready"
 
-# --- Step 4: Install ONNX Runtime ---
+# --- Step 4: Install ONNX Runtime (pip version for CUDA 13) ---
 echo ""
-echo "📌 Step 4: Installing ONNX Runtime..."
-ONNX_VERSION="1.17.0"
-if [ ! -d "/usr/local/onnxruntime" ]; then
-    wget -q "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-gpu-${ONNX_VERSION}.tgz" \
-         -O onnxruntime.tgz
-    sudo mkdir -p /usr/local/onnxruntime
-    sudo tar -xzf onnxruntime.tgz -C /usr/local/onnxruntime --strip-components=1
-    rm onnxruntime.tgz
-    echo "/usr/local/onnxruntime/lib" | sudo tee /etc/ld.so.conf.d/onnxruntime.conf >/dev/null
-    sudo ldconfig 2>/dev/null
+echo "📌 Step 4: Configuring ONNX Runtime..."
+pip install onnxruntime-gpu -q
+# Locate the pip-installed library
+PIP_ORT_PATH=$(find /usr/local/lib -name "libonnxruntime.so.1.*" | grep "caret" -v | head -1 | xargs dirname)
+if [ -z "$PIP_ORT_PATH" ]; then
+    # Fallback search
+    PIP_ORT_PATH=$(find /usr/local/lib -name "libonnxruntime_providers_cuda.so" | head -1 | xargs dirname)
 fi
-export CGO_CFLAGS="-I/usr/local/onnxruntime/include"
-export CGO_LDFLAGS="-L/usr/local/onnxruntime/lib -lonnxruntime"
-export LD_LIBRARY_PATH="/usr/local/onnxruntime/lib:${LD_LIBRARY_PATH:-}"
-echo "✅ ONNX Runtime ready"
+
+echo "   Found ONNX libs at: $PIP_ORT_PATH"
+
+# Setup CGo flags to link against these libs
+export CGO_CFLAGS="-I/usr/local/onnxruntime/include" # We still need headers, download them separately if missing
+if [ ! -d "/usr/local/onnxruntime/include" ]; then
+    wget -q "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz" -O onnx_headers.tgz
+    tar -xzf onnx_headers.tgz
+    sudo mkdir -p /usr/local/onnxruntime/include
+    sudo cp -r onnxruntime-linux-x64-gpu-1.17.0/include/* /usr/local/onnxruntime/include/
+    rm -rf onnxruntime-linux-x64-gpu-1.17.0 onnx_headers.tgz
+fi
+
+export CGO_LDFLAGS="-L${PIP_ORT_PATH} -lonnxruntime"
+export LD_LIBRARY_PATH="${PIP_ORT_PATH}:${LD_LIBRARY_PATH:-}"
+echo "✅ ONNX Runtime configured"
 
 # --- Step 5: Download ResNet-50 ---
 echo ""
@@ -86,8 +93,10 @@ if CGO_ENABLED=1 go build -tags "onnx,nvml" -o bin/worker ./cmd/worker/ 2>/dev/n
     echo "✅ Worker: REAL ONNX + NVML"
     EXECUTOR_TYPE="onnx"
 else
+    # Fallback to pure simulation if CGo fails
+    echo "⚠️  CGo build failed — falling back to simulation"
     go build -o bin/worker ./cmd/worker/
-    echo "✅ Worker: simulation"
+    EXECUTOR_TYPE="simulation"
 fi
 
 # --- Step 7: Install bore (free TCP tunnel) ---
@@ -124,7 +133,7 @@ for i in 1 2 3; do
     MAX_WAIT_MS=50 \
     EXECUTOR_TYPE="${EXECUTOR_TYPE}" \
     USE_NVML=true \
-    LD_LIBRARY_PATH="/usr/local/onnxruntime/lib:${LD_LIBRARY_PATH:-}" \
+    LD_LIBRARY_PATH="${PIP_ORT_PATH}:${LD_LIBRARY_PATH:-}" \
     nohup ./bin/worker > /tmp/worker-${i}.log 2>&1 &
     echo "   ⚡ Worker-${i} on :${GRPC_PORT}"
 done
@@ -173,6 +182,7 @@ if [ -n "$BORE_PORTS" ]; then
     echo "👉 ON YOUR LAPTOP, run this command:"
     echo ""
     echo "   cd ~/Desktop/demo_yc_!"
+    echo "   git pull  # Get latest code first!"
     echo "   WORKER_ENDPOINTS=${BORE_PORTS} go run ./cmd/router/"
     echo ""
     echo "Then open: http://localhost:8080"
@@ -182,12 +192,4 @@ else
     echo "   !cat /tmp/bore-1.log"
     echo "   !cat /tmp/bore-2.log"
     echo "   !cat /tmp/bore-3.log"
-    echo ""
-    echo "Look for lines like: 'listening at bore.pub:XXXXX'"
-    echo "Then on your laptop run:"
-    echo "   WORKER_ENDPOINTS=bore.pub:PORT1,bore.pub:PORT2,bore.pub:PORT3 go run ./cmd/router/"
 fi
-
-echo ""
-echo "📋 Logs:  cat /tmp/worker-1.log"
-echo "🔍 GPU:   nvidia-smi"

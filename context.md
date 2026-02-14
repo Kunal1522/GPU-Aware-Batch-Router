@@ -1,61 +1,111 @@
-# GPU-Aware Intelligent Batch Router — Project Context
+# GPU-Aware Intelligent Batch Router — Project Context & Handover
 
-## 📌 Project Overview
-A high-performance batched inference system for ResNet-50 (ONNX) that routes requests based on real-time GPU metrics.
-- **Router (Local):** Handles HTTP/gRPC requests, queues, metrics, and dashboard.
-- **Workers (Colab):** Run actual inference on **Tesla T4 GPUs** provided by Google Colab.
-- **Connectivity:** Uses **bore.pub** (free TCP tunnels) to expose Colab workers to the local router.
+**📅 Date:** February 15, 2026
+**🚀 Project:** GPU-Aware Batch Router (Go + ONNX Runtime + CUDA + K3s)
+**🎯 Goal:** Route requests to "worker" nodes based on *real-time* GPU metrics (VRAM, Util, Temp) from a Tesla T4.
 
-## 🏗️ Architecture: Split Design
-We moved to a **Split Architecture** to get the best of both worlds:
-1. **Google Colab:** provides the **Real T4 GPU** (free).
-2. **Your Laptop:** runs the **Router & Dashboard** (stable, no ngrok timeout issues).
-3. **Bore Tunnels:** Bridge the two. Workers on Colab -> Internet -> Router on Laptop.
+---
 
-## ✅ Current Status (As of Last Session)
-- **Codebase:** Fully up-to-date with real ONNX Runtime (CGo) and NVML bindings.
-- **Timeouts:** Fixed 3 critical timeout issues to handle bore tunnel latency:
-    - Poller timeout increased: 200ms → 5s
-    - Router forwarding timeout: Client context → New 10s context
-    - Load test timeout: Shared context → Per-request 10s timeout
-- **CUDA Compatibility:** Fixed CPU fallback issue. Colab now runs CUDA 13, but the old C library was v1.17 (CUDA 11). We updated `colab_workers.sh` to use the pip-installed ONNX Runtime (v1.23+) which supports CUDA 13.
+## 🏗️ Architecture: The "Split" Design
+We are using a **hybrid/split architecture** to leverage Google Colab's free GPU while keeping the control plane stable on your local machine.
 
-## 🚀 How to Resume Work (Next Session)
+| Component | Location | Responsibility | Technical Details |
+|-----------|----------|----------------|-------------------|
+| **Workers (x3)** | **Google Colab** | Run AI Inference (ResNet-50) & Collections GPU Metrics | Runs as 3 separate processes on one T4 GPU (using Time-Slicing logic). Uses **CGo** to bind to ONNX Runtime and NVML. |
+| **Router** | **Your Laptop** | Load Balancing, HTTP/gRPC handling, Dashboard | Connects to workers via TCP tunnels. Uses **Weighted Random** routing based on worker scores. |
+| **Dashboard** | **Your Laptop** | Visualization | Web UI on `localhost:8080` showing real-time bars/graphs. |
+| **Connectivity** | **bore.pub** | Tunnels | Free reverse TCP tunnels expose Colab ports (50052-50054) to the internet so your Laptop can reach them. |
 
-### Step 1: Start Workers on Colab
-1. Open a **T4 GPU** runtime on Google Colab.
-2. Clone/Pull the repo.
-3. Run **ONLY** the workers script:
+---
+
+## 🛠️ Current Codebase State
+
+### 1. The "Golden" Script: `scripts/colab_workers.sh`
+This is the **most important file**. It automates the entire Colab setup.
+- **What it does:**
+    1. Installs Go 1.24, Protoc, and `bore` tunnel.
+    2. **CRITICAL FIX:** Installs `onnxruntime-gpu` via pip.
+    3. **CRITICAL FIX:** Dynamically finds the pip-installed `libonnxruntime_providers_cuda.so` (compatible with Colab's CUDA 13) and links your Go binary against it. *Previous method of downloading v1.17 static libs failed because they were for CUDA 11, causing CPU fallback.*
+    4. Builds the `worker` binary with `-tags "onnx,nvml"`.
+    5. Starts 3 workers + 3 bore tunnels.
+    6. Prints the `bore.pub` addresses you need.
+
+### 2. Timeouts & Latency Handling
+Since we are routing over the internet (Laptop → bore.pub → Colab), latency is higher (~200ms). We fixed 3 specific timeouts:
+- **Poller:** `pkg/router/poller.go` — Increased poll timeout from 200ms → **5s**.
+- **Router Forwarding:** `pkg/router/router.go` — Middleware now creates a fresh **10s context** for forwarding instead of inheriting the client's potentially short context.
+- **Load Test:** `scripts/loadtest.go` — Uses a **10s per-request timeout** instead of sharing the global test context (which was causing cascading "Deadline Exceeded" errors).
+
+### 3. Real GPU Bindings
+- **Inference:** `pkg/worker/executor/onnx.go` uses CGo to call ONNX Runtime C API.
+- **Metrics:** `pkg/worker/nvml/nvml.go` uses CGo / dynamic loading to call `libnvidia-ml.so` for real VRAM/Temp usage.
+
+---
+
+## 📋 Operational Guide: How to Resume
+
+**Step 1: Reset & Start on Colab**
+1. Open your Google Colab notebook (ensure Runtime is **T4 GPU**).
+2. Run this block to clean up and start fresh:
    ```bash
+   # Kill any old processes
+   !pkill -f "bin/worker" 2>/dev/null; pkill -f bore 2>/dev/null
+   
+   # Update code & Run the Master Script
+   %cd /content/GPU-Aware-Batch-Router
+   !git pull
    !bash scripts/colab_workers.sh
    ```
-   *(Do NOT run `setup_colab.sh` — that is for the old single-node setup)*
+3. **Wait** for the output. It will eventually print:
+   ```text
+   Worker-1  →  bore.pub:12345
+   Worker-2  →  bore.pub:67890
+   Worker-3  →  bore.pub:13579
+   ```
+   **COPY THESE ADDRESSES.**
 
-4. Copy the **bore addresses** printed at the end (e.g., `bore.pub:12345`).
-
-### Step 2: Start Router on Laptop
-1. go to the project folder:
+**Step 2: Start Router on Laptop**
+1. Open terminal on your laptop:
    ```bash
    cd ~/Desktop/demo_yc_!
    git pull
    ```
-2. Run the router with the bore addresses from Colab:
+2. Run the router with the addresses you copied:
    ```bash
-   WORKER_ENDPOINTS=bore.pub:PORT1,bore.pub:PORT2,bore.pub:PORT3 go run ./cmd/router/
+   # Replace with ACTUAL ports from Colab
+   WORKER_ENDPOINTS=bore.pub:12345,bore.pub:67890,bore.pub:13579 go run ./cmd/router/
    ```
 
-### Step 3: View & Test
-1. **Dashboard:** Open [http://localhost:8080](http://localhost:8080) on your laptop.
-2. **Load Test:**
+**Step 3: Verification (The "Is it Real?" Check)**
+1. **Open Dashboard:** http://localhost:8080
+2. **Fire Load:**
    ```bash
+   # On Laptop, different terminal
    go run scripts/loadtest.go --addr=localhost:50051 --concurrency=10 --duration=30s
    ```
+3. **Verify GPU Usage (On Colab):**
+   While the load test runs, verify the GPU graph spikes in Colab's "Resources" tab, or run:
+   ```bash
+   !nvidia-smi -l 1
+   ```
+   *Expectation:* GPU-Util should go > 0% and Memory Usage should increase. If it stays 0%, the "pip library fix" didn't catch, and it fell back to CPU.
 
-## 🐛 Known Issues & fixes
-- **"Unhealthy" Workers:** Likely due to tunnel latency. If this happens, just restart the router or check if Colab runtime disconnected.
-- **GPU Usage 0%:** If this happens, verify `scripts/colab_workers.sh` was used (it has the fix). Run `!nvidia-smi` on Colab while load testing to confirm usage.
+---
 
-## 📂 Key Files
-- `scripts/colab_workers.sh`: The master script for Colab.
-- `pkg/router/router.go`: Routing logic (weighted random).
-- `pkg/worker/executor/onnx.go`: Real CGo bindings for ONNX Runtime.
+## 🐛 Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| **"Unhealthy" Workers** | Bore tunnel connection died or timeout. | Restart router on laptop. If that fails, restart tunnels on Colab (re-run script). |
+| **GPU Memory 0 MiB** | ONNX Runtime fell back to CPU execution. | Ensure `scripts/colab_workers.sh` is using the `PIP_ORT_PATH` logic. Run the verification python script to confirm CUDA works on the machine. |
+| **Latency > 1s** | You are running on CPU, not GPU. | Same as above — check `!head -10 /tmp/worker-1.log`. It should say `Executor: onnx-gpu`. |
+| **"Deadline Exceeded"** | Tunnels are slow. | We already fixed timeouts (10s), but if internet is terrible, you might need to increase `metrics.go` poll timeout even more. |
+
+---
+
+## ⏭️ Next Steps
+1. **Verify the Graph Spike:** We fixed the libraries, now we need to visually confirm the GPU usage graph goes up on Colab during a Go load test.
+2. **Load Testing:** Push it harder. Try `concurrency=30` or `50` to see how the "Least Loaded" or "Weighted Random" routing handles pressure.
+3. **Chaos Testing:** Kill a worker on Colab (`kill <PID>`) and watch the Laptop Dashboard mark it offline and route traffic to the other two.
+
+**Code is live at:** `https://github.com/Kunal1522/GPU-Aware-Batch-Router`

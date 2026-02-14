@@ -1,0 +1,165 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-router-config
+data:
+  ROUTER_PORT: "50051"
+  DASHBOARD_PORT: "8080"
+  POLL_INTERVAL_MS: "500"
+  WORKER_PORT: "50052"
+  METRICS_PORT: "9090"
+  MAX_BATCH_SIZE: "32"
+  MAX_WAIT_MS: "50"
+  EXECUTOR_TYPE: "simulation"
+  USE_NVML: "auto"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gpu-router
+  template:
+    metadata:
+      labels:
+        app: gpu-router
+    spec:
+      containers:
+        - name: router
+          image: gpu-router:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+              name: grpc
+            - containerPort: 8080
+              name: dashboard
+          env:
+            - name: ROUTER_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: gpu-router-config
+                  key: ROUTER_PORT
+            - name: DASHBOARD_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: gpu-router-config
+                  key: DASHBOARD_PORT
+            - name: POLL_INTERVAL_MS
+              valueFrom:
+                configMapKeyRef:
+                  name: gpu-router-config
+                  key: POLL_INTERVAL_MS
+            - name: WORKER_ENDPOINTS
+              value: "worker-0.workers:50052,worker-1.workers:50052,worker-2.workers:50052"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: worker
+spec:
+  serviceName: workers
+  replicas: 3
+  selector:
+    matchLabels:
+      app: gpu-worker
+  template:
+    metadata:
+      labels:
+        app: gpu-worker
+    spec:
+      containers:
+        - name: worker
+          image: gpu-worker:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50052
+              name: grpc
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WORKER_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: gpu-router-config
+                  key: WORKER_PORT
+            - name: METRICS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: gpu-router-config
+                  key: METRICS_PORT
+            - name: MAX_BATCH_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: gpu-router-config
+                  key: MAX_BATCH_SIZE
+            - name: MAX_WAIT_MS
+              valueFrom:
+                configMapKeyRef:
+                  name: gpu-router-config
+                  key: MAX_WAIT_MS
+            - name: EXECUTOR_TYPE
+              valueFrom:
+                configMapKeyRef:
+                  name: gpu-router-config
+                  key: EXECUTOR_TYPE
+            - name: USE_NVML
+              valueFrom:
+                configMapKeyRef:
+                  name: gpu-router-config
+                  key: USE_NVML
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+              # nvidia.com/gpu: 1  # Uncomment on GPU nodes
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+              # nvidia.com/gpu: 1  # Uncomment on GPU nodes
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: router
+spec:
+  selector:
+    app: gpu-router
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+    - name: dashboard
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+# Headless service for worker StatefulSet (enables DNS: worker-0.workers, worker-1.workers, etc.)
+apiVersion: v1
+kind: Service
+metadata:
+  name: workers
+spec:
+  selector:
+    app: gpu-worker
+  clusterIP: None
+  ports:
+    - name: grpc
+      port: 50052
+      targetPort: 50052
+    - name: metrics
+      port: 9090
+      targetPort: 9090

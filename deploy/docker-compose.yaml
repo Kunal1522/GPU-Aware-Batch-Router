@@ -1,0 +1,62 @@
+services:
+  router:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.router
+    ports:
+      - "50051:50051"
+      - "8080:8080"
+    environment:
+      - ROUTER_PORT=50051
+      - DASHBOARD_PORT=8080
+      - WORKER_ENDPOINTS=worker-1:50052,worker-2:50052,worker-3:50052
+      - POLL_INTERVAL_MS=500
+    depends_on:
+      - worker-1
+      - worker-2
+      - worker-3
+
+  worker-1:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.worker
+    environment:
+      - WORKER_ID=worker-1
+      - WORKER_PORT=50052
+      - METRICS_PORT=9090
+      - MAX_BATCH_SIZE=32
+      - MAX_WAIT_MS=50
+      - EXECUTOR_TYPE=simulation
+      - USE_NVML=false
+    ports:
+      - "9091:9090"
+
+  worker-2:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.worker
+    environment:
+      - WORKER_ID=worker-2
+      - WORKER_PORT=50052
+      - METRICS_PORT=9090
+      - MAX_BATCH_SIZE=32
+      - MAX_WAIT_MS=50
+      - EXECUTOR_TYPE=simulation
+      - USE_NVML=false
+    ports:
+      - "9092:9090"
+
+  worker-3:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.worker
+    environment:
+      - WORKER_ID=worker-3
+      - WORKER_PORT=50052
+      - METRICS_PORT=9090
+      - MAX_BATCH_SIZE=32
+      - MAX_WAIT_MS=50
+      - EXECUTOR_TYPE=simulation
+      - USE_NVML=false
+    ports:
+      - "9093:9090"

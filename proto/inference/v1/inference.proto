@@ -1,0 +1,53 @@
+syntax = "proto3";
+package inference.v1;
+
+option go_package = "github.com/kunal/gpu-batch-router/gen/inference/v1;inferencev1";
+
+// InferenceService — Client → Router, or Router → Worker
+service InferenceService {
+  rpc Infer(InferRequest) returns (InferResponse);
+}
+
+// WorkerMetricsService — Router polls each worker for GPU stats
+service WorkerMetricsService {
+  rpc GetMetrics(MetricsRequest) returns (WorkerMetrics);
+}
+
+// Priority levels for QoS
+enum Priority {
+  LOW    = 0;
+  MEDIUM = 1;
+  HIGH   = 2;
+}
+
+message InferRequest {
+  string   request_id = 1;
+  bytes    payload    = 2;  // image bytes or tensor data
+  int64    timestamp  = 3;  // unix nanos
+  string   model_name = 4;  // e.g. "resnet50"
+  Priority priority   = 5;
+}
+
+message InferResponse {
+  string request_id    = 1;
+  bytes  result        = 2;
+  int64  latency_ns    = 3;
+  string worker_id     = 4;
+  int32  batch_size    = 5;  // how many were batched together
+  int32  queue_wait_ms = 6;  // time spent in queue
+  string priority_used = 7;  // echoed back
+}
+
+message MetricsRequest {}
+
+message WorkerMetrics {
+  string  worker_id       = 1;
+  double  vram_free_gb    = 2;
+  double  vram_total_gb   = 3;
+  int32   queue_depth     = 4;
+  double  avg_latency_ms  = 5;
+  double  gpu_utilization = 6;  // 0-100
+  double  temperature_c   = 7;
+  int32   current_batch   = 8;
+  bool    healthy         = 9;
+}

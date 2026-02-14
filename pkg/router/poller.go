@@ -5,6 +5,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	pb "github.com/kunal/gpu-batch-router/gen/inference/v1"
 )
 
 // Poller periodically fetches metrics from all registered workers.
@@ -67,10 +69,10 @@ func (p *Poller) pollAll() {
 		go func(entry *WorkerEntry) {
 			defer wg.Done()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			metrics, err := entry.MetricsClient.GetMetrics(ctx, nil)
+			metrics, err := entry.MetricsClient.GetMetrics(ctx, &pb.MetricsRequest{})
 			if err != nil {
 				p.registry.MarkFailed(entry.Address)
 				return
